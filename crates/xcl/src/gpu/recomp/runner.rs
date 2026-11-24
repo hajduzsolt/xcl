@@ -451,16 +451,21 @@ pub fn mesh_shaders_supported() -> Result<bool, String> {
 }
 
 /// A GPU test (or a part of one) that cannot run here, `reason` one of "no GPU", "no DXC",
-/// "no wave64", "no mesh shaders": `SKIPPED <test>: <reason>` written to stderr itself, so the
-/// line shows without `--nocapture` (libtest captures only `print!` / `eprint!`), and
-/// `scripts/test.ps1` counts them. `XCL_REQUIRE_GPU=wave64` or `=mesh` (or both, comma-separated)
-/// turns a skip that leaves that coverage out into a failure.
+/// "no wave64", "no mesh shaders", "no heap windows": `SKIPPED <test>: <reason>` written to
+/// stderr itself, so the line shows without `--nocapture` (libtest captures only `print!` /
+/// `eprint!`), and `scripts/test.ps1` counts them. `XCL_REQUIRE_GPU=wave64` or `=mesh` (or
+/// both, comma-separated) turns a skip that leaves that *capability* coverage out into a
+/// failure. Opt-in feature skips ("no heap windows") are never treated as coverage gaps.
 pub fn skip_test(reason: &str) {
     use std::io::Write;
     let thread = std::thread::current();
     let test = thread.name().unwrap_or("?");
     let required = std::env::var("XCL_REQUIRE_GPU").unwrap_or_default();
-    let fails = required.split(',').map(str::trim).any(|r| match r {
+    // Opt-in feature skips are not coverage gaps: a test that requires an env-gated feature
+    // (`XCL_HEAP_WINDOWS=1`) should pass through under any `XCL_REQUIRE_GPU` mode.
+    const OPTIN_SKIPS: &[&str] = &["no heap windows"];
+    let is_optin = OPTIN_SKIPS.contains(&reason);
+    let fails = !is_optin && required.split(',').map(str::trim).any(|r| match r {
         "wave64" => reason != "no mesh shaders",
         "mesh" => reason != "no wave64",
         _ => false,
@@ -469,6 +474,75 @@ pub fn skip_test(reason: &str) {
         panic!("{test}: {reason}, but XCL_REQUIRE_GPU={required}");
     }
     let _ = writeln!(std::io::stderr(), "SKIPPED {test}: {reason}");
+}
+
+/// Returns true when the given skip `reason` would cause a panic under `XCL_REQUIRE_GPU=required`.
+/// Extracted for unit testing without touching global env state.
+#[cfg(test)]
+fn skip_would_fail(reason: &str, required: &str) -> bool {
+    const OPTIN_SKIPS: &[&str] = &["no heap windows"];
+    let is_optin = OPTIN_SKIPS.contains(&reason);
+    !is_optin && required.split(',').map(str::trim).any(|r| match r {
+        "wave64" => reason != "no mesh shaders",
+        "mesh" => reason != "no wave64",
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skip_would_fail;
+
+    // Before the fix, skip_would_fail("no heap windows", "mesh") returned true (panic),
+    // because the "mesh" arm only exempted "no wave64".  After the fix it returns false.
+    #[test]
+    fn optin_heap_windows_skip_does_not_fail_under_require_gpu_mesh() {
+        assert!(
+            !skip_would_fail("no heap windows", "mesh"),
+            "\"no heap windows\" is an opt-in feature skip, not a mesh-coverage gap"
+        );
+    }
+
+    #[test]
+    fn optin_heap_windows_skip_does_not_fail_under_require_gpu_wave64() {
+        assert!(
+            !skip_would_fail("no heap windows", "wave64"),
+            "\"no heap windows\" is an opt-in feature skip, not a wave64-coverage gap"
+        );
+    }
+
+    #[test]
+    fn optin_heap_windows_skip_does_not_fail_under_require_gpu_both() {
+        assert!(
+            !skip_would_fail("no heap windows", "mesh,wave64"),
+            "\"no heap windows\" is opt-in and must not fail under any XCL_REQUIRE_GPU mode"
+        );
+    }
+
+    // The existing cross-exemptions: wave64 mode exempts "no mesh shaders" (and vice versa),
+    // so a test that skips because the other mode is unavailable is not a coverage gap.
+    #[test]
+    fn capability_skip_no_gpu_fails_under_require_gpu_mesh() {
+        assert!(
+            skip_would_fail("no GPU", "mesh"),
+            "\"no GPU\" is a capability gap and must fail under XCL_REQUIRE_GPU=mesh"
+        );
+    }
+
+    #[test]
+    fn capability_skip_no_gpu_fails_under_require_gpu_wave64() {
+        assert!(
+            skip_would_fail("no GPU", "wave64"),
+            "\"no GPU\" is a capability gap and must fail under XCL_REQUIRE_GPU=wave64"
+        );
+    }
+
+    #[test]
+    fn no_require_gpu_never_fails() {
+        assert!(!skip_would_fail("no heap windows", ""));
+        assert!(!skip_would_fail("no wave64", ""));
+        assert!(!skip_would_fail("no GPU", ""));
+    }
 }
 
 /// Run a compiled kernel (DXIL) with `state` and flat memory `mem`.
