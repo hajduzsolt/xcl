@@ -1268,23 +1268,33 @@ mod tests {
     fn xasync_entry_points_validate_before_pc_forwarding() {
         let _g = crate::hle::xgameruntime::xasync::ASYNC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
+        static HITS: AtomicU32 = AtomicU32::new(0);
+        unsafe extern "system" fn status(_: usize, _: *mut XAsyncBlock, _: bool) -> HRESULT { HITS.fetch_add(1, Ordering::SeqCst); S_OK }
+        unsafe extern "system" fn result_size(_: usize, _: *mut XAsyncBlock, _: *mut usize) -> HRESULT { HITS.fetch_add(1, Ordering::SeqCst); S_OK }
+        unsafe extern "system" fn cancel(_: usize, _: *mut XAsyncBlock) { HITS.fetch_add(1, Ordering::SeqCst); }
+        unsafe extern "system" fn run(_: usize, _: *mut XAsyncBlock, _: usize) -> HRESULT { HITS.fetch_add(1, Ordering::SeqCst); S_OK }
+        unsafe extern "system" fn begin(_: usize, _: *mut XAsyncBlock, _: *mut c_void, _: *const c_void, _: *const u8, _: usize) -> HRESULT { HITS.fetch_add(1, Ordering::SeqCst); S_OK }
+        unsafe extern "system" fn schedule(_: usize, _: *mut XAsyncBlock, _: u32) -> HRESULT { HITS.fetch_add(1, Ordering::SeqCst); S_OK }
+        unsafe extern "system" fn complete(_: usize, _: *mut XAsyncBlock, _: HRESULT, _: usize) { HITS.fetch_add(1, Ordering::SeqCst); }
+        unsafe extern "system" fn result(_: usize, _: *mut XAsyncBlock, _: *const c_void, _: usize, _: *mut c_void, _: *mut usize) -> HRESULT { HITS.fetch_add(1, Ordering::SeqCst); S_OK }
+
         struct PcReset;
         impl Drop for PcReset {
-            fn drop(&mut self) {
-                use_pc(0);
-            }
+            fn drop(&mut self) { use_pc(0); }
         }
         let _reset = PcReset;
-
-        unsafe extern "system" fn panic_slot(_obj: usize) -> HRESULT {
-            panic!("null XAsyncBlock or invalid argument must not be forwarded to PC vtable");
-        }
-
-        // COM vtable with panic_slot for all slots
-        let vtable: [usize; 32] = [panic_slot as usize; 32];
+        let mut vtable = [0usize; 12];
+        vtable[3] = status as *const () as usize;
+        vtable[4] = result_size as *const () as usize;
+        vtable[5] = cancel as *const () as usize;
+        vtable[6] = run as *const () as usize;
+        vtable[7] = begin as *const () as usize;
+        vtable[9] = schedule as *const () as usize;
+        vtable[10] = complete as *const () as usize;
+        vtable[11] = result as *const () as usize;
         let vtable_ptr = vtable.as_ptr();
         let obj = &vtable_ptr as *const _ as usize;
-
+        HITS.store(0, Ordering::SeqCst);
         use_pc(obj);
 
         unsafe {
@@ -1305,6 +1315,9 @@ mod tests {
             assert_eq!(XAsyncRun(&mut b, 0), E_INVALIDARG);
 
             assert_eq!(begin_with_fixups(std::ptr::null_mut(), 0x5678, || Ok(PayloadBuf { bytes: vec![1, 2, 3], fixups: Vec::new() })), E_INVALIDARG);
+            assert_eq!(HITS.load(Ordering::SeqCst), 0);
+            assert_eq!(XAsyncGetStatus(&mut b, false), S_OK);
+            assert_eq!(HITS.load(Ordering::SeqCst), 1);
         }
     }
 }
